@@ -1,0 +1,28 @@
+OpenBMC subtree management tool
+-------------------------------
+
+Quickstart
+-------------------------------
+From whatever directory this repository was cloned to:
+git clone ssh://openbmc.gerrit/openbmc/openbmc
+./subtree update -c master.conf -t openbmc -sxa
+cd openbmc && git push origin HEAD:refs/for/master
+
+Description
+-------------------------------
+openbmc-subtree is a combo-layer inspired tool for managing the various subtrees
+of the openbmc repository for the OpenBMC project.
+
+Unlike combo-layer, openbmc-subtree does not try to be a general purpose tool
+and drops support for things like python-in-configuration and script callbacks
+on patch generation.  Further, support for generating combo repositories from
+scratch is not fully implemented and completely untested.
+
+openbmc-subtree also differs from combo-layer in that it makes use of git's
+subtree merge strategy to create patches instead of generating and manipulating
+patches directly.
+
+Finally openbmc-subtree introduces support for a "reset" usage scenario where a
+subtree can be completely reset - OpenBMC uses this when switching from one
+upstream release branch to another.
+

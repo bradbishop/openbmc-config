@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+
+# Contributors Listed Below - COPYRIGHT 2019
+# [+] International Business Machines Corp.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+import argparse
+import configparser
+import os
+import sh
+import sys
+import tempfile
+
+rsync = sh.rsync.bake('-xa',  '--delete',  '--exclude',  '.git/')
+
+
+def display(msg):
+    print(msg)
+
+
+def log(msg, args):
+    if args.noisy:
+        display('{}'.format(msg))
+
+
+def decode(arg, desc='stdout'):
+    obj = getattr(arg, desc)
+    return obj.decode('utf-8').strip()
+
+
+def read_config(args):
+    config = configparser.ConfigParser()
+    newconfig = configparser.ConfigParser()
+    try:
+        with open(args.configfile):
+            config.read(args.configfile)
+            newconfig.read(args.configfile)
+    except FileNotFoundError:
+        sys.exit('Could not open config file: {}'.format(args.configfile))
+    setattr(args, 'config', config)
+    setattr(args, 'newconfig', newconfig)
+
+
+def shell_until_clean(args, target, message):
+    """Keep dropping the user to a shell until there are no unstaged
+    changes."""
+    shell = os.getenv('SHELL', 'bash')
+    shell = getattr(sh, shell)
+
+    while True:
+        shell(_fg=True)
+        status = decode(args.git.status('--porcelain', target))
+        if status == '':
+            break
+
+        # This allows the script to procede if there are staged changes
+        # but no unstaged changes.  Is that the right logic?
+        if all([line[1] == ' ' for line in status.split('\n')]):
+            break
+
+        display(message)
+
+    return status
+
+
+def setup_and_validate_subtrees(args):
+    """Warn the user if a subtree specified on the command line was not found
+    in subtree.conf."""
+    if not args.subtrees:
+        setattr(args, 'subtrees', args.config.sections())
+
+    valid_subtrees = set(args.subtrees).intersection(args.config.sections())
+    invalid_subtrees = set(args.subtrees).difference(valid_subtrees)
+
+    if invalid_subtrees:
+        display('Skipping invalid subtree(s): \'{}\''.format(
+            ' '.join(invalid_subtrees)))
+
+    setattr(args, 'subtrees', valid_subtrees)
+
+
+def validate_target_subtrees(args):
+    """Abort the program if any subtrees were not found (this usually means the
+    user did not specify a target and by default we are looking for subtrees
+    in the directory from which the program was invoked).  Abort the program
+    if any target subtrees are dirty."""
+    targets = [args.config[x]['dest_dir'] for x in args.subtrees]
+    dirty_subtrees = []
+    missing_subtrees = []
+    for x in targets:
+        if not os.path.exists(os.path.join(args.target, x)):
+            missing_subtrees.append(x)
+        if decode(args.git.status('--porcelain', x)) != '':
+            dirty_subtrees.append(x)
+
+    missing_subtree_fmt = 'Subtree{0} {2} {1} not exist.  Cannot {3}.'
+    missing_subtree_args = ['s', 'do']
+    if len(missing_subtrees) == 1:
+        missing_subtree_args = ['', 'does']
+    if missing_subtrees:
+        missing_subtree_args.append(', '.join(missing_subtrees))
+        missing_subtree_args.append(args.op)
+        sys.exit(missing_subtree_fmt.format(*missing_subtree_args))
+
+    dirty_subtree_fmt = 'Subtree{0} {2} {1} dirty.  Cannot {3}.'
+    dirty_subtree_args = ['s', 'are']
+    if len(dirty_subtrees) == 1:
+        dirty_subtree_args = ['', 'is']
+    if dirty_subtrees:
+        dirty_subtree_args.append(', '.join(dirty_subtrees))
+        dirty_subtree_args.append(args.op)
+        sys.exit(dirty_subtree_fmt.format(*dirty_subtree_args))
+
+
+def validate_config_repo(args):
+    """Warn the user if autocommit was specified but subtree.conf is not in a
+    git repository.  Abort the program if subtree.conf is in a dirty
+    repository"""
+    workdir = os.path.normpath(os.path.dirname(args.configfile))
+    status_args = ['--porcelain', os.path.basename(args.configfile)]
+    try:
+        if not args.force:
+            if decode(sh.git.status(*status_args, _cwd=workdir)) != '':
+                dirty_fmt = '{} is dirty. Cannot {}.'
+                sys.exit(dirty_fmt.format(workdir, args.op))
+    except sh.ErrorReturnCode_128:
+        # not a git repository
+        if args.autocommit_update:
+            message_fmt = '{} is not a git repository.  Cannot autocommit.'
+            display(message_fmt.format(workdir))
+            setattr(args, 'autocommit', False)
+
+
+def reset_one_subtree(args, subtree):
+    uri = args.config[subtree]['src_uri']
+    branch = args.config[subtree]['branch']
+    target = args.config[subtree]['dest_dir']
+    new_subtree_head = None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clone_args = ['--branch', branch, '--single-branch', uri, tmpdir]
+        sh.git.clone(*clone_args)
+        new_subtree_head = decode(git('rev-parse', branch, _cwd=tmpdir))
+        rev_parse_args = ('--abbrev-ref', 'HEAD')
+        rsync(tmpdir + os.sep, target + os.sep)
+
+    if decode(git.status('--porcelain', target)) == '':
+        return None
+
+    git.add(target)
+    return new_subtree_head
+
+
+def setup_and_validate_reset(args):
+    """Reset subcommand validation callback."""
+    setup_and_validate_subtrees(args)
+    validate_target_subtrees(args)
+    validate_config_repo(args)
+
+
+def get_commit_message_for_reset(args, reset_subtrees):
+    if len(reset_subtrees) == 1:
+        s = reset_subtrees[0]
+        sha = args.newconfig[s]['last_revision'][:10]
+        branch = args.newconfig[s]['branch']
+        commit_msg_args = {
+            'subtree': reset_subtrees[0], 'sha': sha, 'branch': branch}
+        commit_msg_fmt = 'reset {subtree} subtree on {branch} HEAD({sha})'
+        commit_msg = commit_msg_fmt.format(**commit_msg_args)
+    elif reset_subtrees:
+        commit_msg = 'reset upstream subtrees to HEAD\n\n'
+        commit_msg += 'Reset the following subtrees on HEAD:\n\n'
+
+        for s in reset_subtrees:
+            sha = args.newconfig[s]['last_revision'][:10]
+            branch = args.newconfig[s]['branch']
+            commit_msg_args = {'subtree': s, 'sha': sha, 'branch': branch}
+            commit_msg_fmt = '  {subtree}: {sha}({branch})\n'
+            commit_msg += commit_msg_fmt.format(**commit_msg_args)
+
+    return commit_msg
+
+
+def autocommit_reset(args, reset_info):
+    """When doing a reset and subtree.conf is changed and exists in a git
+    repository, generate a commit in that repository."""
+    workdir = os.path.dirname(args.configfile)
+    autocommit_message = 'subtree {}\n\n'.format(args.op)
+
+    basename = os.path.basename(sys.argv[0])
+    cmdline = [basename] + sys.argv[1:]
+    autocommit_message += '\n{}'.format(' '.join(cmdline))
+    git.add(os.path.basename(args.configfile), _cwd=workdir)
+    commit_args = ['-m', autocommit_message]
+    git.commit(*commit_args, _cwd=workdir)
+
+
+def do_reset(args):
+    """Reset subcommand callback"""
+    reset_subtrees = []
+
+    for s in args.subtrees:
+        new_subtree_head = reset_one_subtree(args, s)
+        if new_subtree_head:
+            display('{} reset to {}'.format(s, new_subtree_head[:10]))
+            reset_subtrees.append(s)
+            args.newconfig[s]['last_revision'] = new_subtree_head
+        else:
+            display('{} is up to date'.format(s))
+
+    if args.config != args.newconfig:
+        commit_msg = get_commit_message_for_reset(args, reset_subtrees)
+        commit_args = ['-e', '-m', commit_msg]
+        if args.signoff:
+            commit_args.insert(0, '-s')
+        git.commit(*commit_args, _fg=True)
+        with open(args.configfile, 'w') as fd:
+            args.newconfig.write(fd)
+
+        if args.autocommit:
+            autocommit_reset(args, reset_subtrees)
+
+
+def setup_and_validate_update(args):
+    """Update subcommand validation callback."""
+    if args.shortlog:
+        setattr(args, 'squash', True)
+    setup_and_validate_subtrees(args)
+    validate_target_subtrees(args)
+    validate_config_repo(args)
+
+
+def insert_from_subtree_rev(rev, subtree, commit_msg):
+    """Insert a git-cherry-pick-dash-x-like message into a commit message."""
+    insertion_pos = commit_msg.rindex('\n\n')
+    from_subtree_rev = '\n\n(From {} rev: {})'.format(subtree, rev)
+
+    return commit_msg[:insertion_pos] + from_subtree_rev \
+        + commit_msg[insertion_pos:]
+
+
+def rehash_change_id(rev, subtree, commit_msg):
+    """When constituent repositories use Gerrit Code Review, the commit
+    messages will have Change-Id: in the foot.  Rehash it so a new change is
+    created in Gerrit."""
+    try:
+        change_id_begin = commit_msg.index(
+            'Change-Id: I') + len('Change-Id: I')
+    except ValueError:
+        # A commit message need not have a Change-Id
+        return commit_msg
+    change_id_end = change_id_begin + 40
+    change_id = commit_msg[change_id_begin:change_id_end]
+    rehashed_change_id = decode(sh.git(
+        sh.echo('-ne', change_id), 'hash-object', '--stdin')).strip()
+    return commit_msg[:change_id_begin] + rehashed_change_id \
+        + commit_msg[change_id_end:]
+
+
+def update_one_subtree(args, subtree):
+    uri = args.config[subtree]['src_uri']
+    branch = args.config[subtree]['branch']
+    target = args.config[subtree]['dest_dir']
+    last_rev = args.config[subtree]['last_revision']
+
+    remote_branch = 'refs/heads/{}'.format(branch)
+    args.git.fetch(uri, remote_branch)
+    bound = (last_rev, 'FETCH_HEAD')
+    rev_args = ('rev-list', '--reverse', '{}..{}'.format(*bound))
+    revs = decode(args.git(*rev_args)).split()
+    results = []
+
+    for r in revs:
+        revlist = '{}~1..{}'.format(r, r)
+        subject = decode(args.git.log('--format=format:%h... %s', revlist))
+        results.append((r, 'skipped', subject))
+        progress = '{}: {}'.format(subtree, subject)
+
+        x_subtree = '-Xsubtree={}'.format(target)
+        cherry_pick_args = ['-n', '--strategy=subtree', x_subtree, r]
+
+        try:
+            args.git('cherry-pick', *cherry_pick_args)
+        except sh.ErrorReturnCode_1 as e:
+            extra_hints = '\nhint: then resume subtree update with \'exit\' '
+            extra_hints += 'or \'exit 1\' to abort'
+            failure_message = decode(e, desc='stderr') + extra_hints
+            display(failure_message)
+            try:
+                if shell_until_clean(args, target, failure_message) == '':
+                    progress += '\n    skipped (already applied)'
+                    display(progress)
+                    continue
+            except sh.ErrorReturnCode_1:
+                sys.exit('subtree update aborted')
+
+        if decode(args.git.status('--porcelain', target)) == '':
+            progress += '\n    skipped (already applied)'
+            display(progress)
+            continue
+
+        commit_msg = ''
+        commit_args = []
+        if not args.squash:
+            author = decode(
+                args.git.log('--format=format:"%an <%ae>"', revlist))
+            commit_date = decode(args.git.log('--format=format:%ad', revlist))
+            commit_args = ['--author', author] + commit_args
+            commit_args = ['--date', commit_date] + commit_args
+            log_args = ['--format=format:%s%n%n%b', '{}~1..{}'.format(r, r)]
+            commit_msg = decode(args.git.log(*log_args))
+            if args.dash_x:
+                commit_msg = insert_from_subtree_rev(r, subtree, commit_msg)
+            commit_msg = rehash_change_id(r, subtree, commit_msg)
+        else:
+            commit_msg = 'work in progress subtree update commit'
+            if hasattr(args, 'first-squash-commit'):
+                commit_args.insert(0, '--amend')
+
+        if args.signoff:
+            commit_args.insert(0, '-s')
+        try:
+            args.git.commit('-m', commit_msg, *commit_args)
+        except sh.ErrorReturnCode_1:
+            if decode(args.git.status('--porcelain', target)) == '':
+                progress += '\n    skipped (already applied)'
+                display(progress)
+                continue
+            raise
+
+        if not hasattr(args, 'first-squash-commit'):
+            setattr(args, 'first-squash-commit', True)
+
+        display(progress)
+        results[-1] = (results[-1][0], 'applied', results[-1][2])
+
+    return results
+
+
+def get_commit_message_for_squashed_update(subtrees, args):
+    if len(subtrees) == 1:
+        subtree = subtrees[0]
+
+        branch = args.config[subtree]['branch']
+        original_rev = args.config[subtree]['last_revision'][:10]
+        new_rev = args.newconfig[subtree]['last_revision'][:10]
+        revlist = '{}..{}'.format(original_rev, new_rev)
+
+        commit_header_fmt = '{}: refresh {}: {}'
+        commit_header_args = (subtree, branch, revlist)
+        commit_msg = commit_header_fmt.format(*commit_header_args)
+        commit_msg += '\n\nUpdate {} to {} HEAD.\n\n'.format(subtree, branch)
+
+        if args.shortlog:
+            workdir = args.config[subtree]['local_repo_dir']
+            commit_msg += decode(args.git('shortlog', revlist))
+    else:
+        commit_msg = 'subtree update\n\n'
+        for s in subtrees:
+            branch = args.config[s]['branch']
+            original_rev = args.config[s]['last_revision'][:10]
+            new_rev = args.newconfig[s]['last_revision'][:10]
+            revlist = '{}..{}'.format(original_rev, new_rev)
+
+            commit_header_fmt = '{} - refresh {} {}\n'
+            commit_header_args = (s, branch, revlist)
+            commit_msg += commit_header_fmt.format(*commit_header_args)
+        commit_msg += '\n'
+
+    return commit_msg
+
+
+def do_update(args):
+    """Update subcommand callback"""
+    all_update_info = {}
+
+    for s in args.subtrees:
+        update_info = update_one_subtree(args, s)
+        if update_info:
+            all_update_info[s] = update_info
+            args.newconfig[s]['last_revision'] = update_info[-1][0]
+        else:
+            display('{} is up to date'.format(s))
+
+    if hasattr(args, 'first-squash-commit') and args.squash:
+        commit_msg = get_commit_message_for_squashed_update(
+            list(all_update_info), args)
+        commit_args = ['--amend', '-e', '-m', commit_msg]
+        if args.signoff:
+            commit_args.insert(0, '-s')
+
+        # _cwd=args.target does not seem to work like I want with _fg=True
+        # (we don't wind up editing the commit message in args.target/.git)
+        cwd = os.getcwd()
+        os.chdir(args.target)
+        sh.git.commit(*commit_args, _fg=True)
+        os.chdir(cwd)
+
+    if args.config != args.newconfig:
+        with open(args.configfile, 'w') as fd:
+            args.newconfig.write(fd)
+        if args.autocommit:
+            autocommit_update(args, all_update_info)
+
+
+def autocommit_update(args, update_info):
+    """When doing a reset and subtree.conf is changed and exists in a git
+    repository, generate a commit in that repository."""
+    workdir = os.path.normpath(os.path.dirname(args.configfile))
+    autocommit_message = 'subtree {}\n\n'.format(args.op)
+    for s, revs in update_info.items():
+        original_rev = args.config[s]['last_revision'][:10]
+        new_rev = args.newconfig[s]['last_revision'][:10]
+        autocommit_message += '{} {} -> {}:\n'.format(s, original_rev, new_rev)
+        for r in revs:
+            autocommit_message += '    {} {}\n'.format(r[1], r[2])
+
+    basename = os.path.basename(sys.argv[0])
+    cmdline = [basename] + sys.argv[1:]
+    autocommit_message += '\n{}'.format(' '.join(cmdline))
+    sh.git.add(os.path.basename(args.configfile), _cwd=workdir)
+    commit_args = ['-m', autocommit_message]
+    sh.git.commit(*commit_args, _cwd=workdir)
+
+
+def main():
+    app_description = '''OpenBMC subtree management tool.'''
+    parser = argparse.ArgumentParser(
+        description=app_description)
+
+    subparsers = parser.add_subparsers(title='subcommands')
+    # required=True results in:
+    # TypeError: sequence item 0: expected str instance, NoneType found
+    # on call to parse_args ?
+
+    reset_parser_description = '''
+Reset one or more subtrees.  Subtrees are reset to HEAD of the constituent
+repository branch configured in subtree.conf.  Any edits (like backports) to
+the subtree that don't exit in the consituent repository are overwritten.'''
+    reset_parser = subparsers.add_parser(
+        'reset', help='Reset one or more subtrees',
+        description=reset_parser_description)
+    reset_parser.set_defaults(func=do_reset)
+    reset_parser.set_defaults(op='reset')
+    reset_parser.set_defaults(setup=setup_and_validate_reset)
+
+    update_parser_description = '''
+Update one or more subtrees.  Constituent repositories are updated and any
+patches between last_revision and HEAD are applied to the configured subtree in
+subtree.conf.'''
+    update_parser = subparsers.add_parser(
+        'update', help='Update one or more subtrees',
+        description=update_parser_description)
+    update_parser.add_argument(
+        '--shortlog', dest='shortlog', action='store_true',
+        help='add a shortlog to commit message, implies --squash')
+    update_parser.add_argument(
+        '-x', dest='dash_x', action='store_true',
+        help='insert (From ... rev: ...) into commit messages, like git \
+        cherry-pick -x')
+    update_parser.add_argument(
+        '--squash', dest='squash', action='store_true',
+        help='squash patches into a single commit')
+
+    update_parser.set_defaults(func=do_update)
+    update_parser.set_defaults(op='update')
+    update_parser.set_defaults(setup=setup_and_validate_update)
+
+    verbose_parsers = [update_parser, reset_parser]
+    config_parsers = [update_parser, reset_parser]
+    subtree_parsers = [update_parser, reset_parser]
+    sign_off_parsers = [update_parser, reset_parser]
+    autocommit_parsers = [update_parser, reset_parser]
+    target_parsers = [update_parser, reset_parser]
+    force_parsers = [update_parser, reset_parser]
+
+    for p in verbose_parsers:
+        p.add_argument(
+            '-v', '--verbose', dest='noisy', action='store_true',
+            help='enable verbose status messages')
+
+    for p in config_parsers:
+        p.add_argument(
+            '-c', '--config', dest='configfile', action='store',
+            default='subtree.conf', help='path to subtree.conf, defaults to \
+            subtree.conf')
+
+    for p in subtree_parsers:
+        p.add_argument(
+            '--subtree', dest='subtrees', action='append',
+            help='subtree to update, can be specified multiple times',
+            default=[])
+
+    for p in sign_off_parsers:
+        p.add_argument(
+            '-s', '--signoff', dest='signoff', action='store_true',
+            help='add Signed-off-by:')
+
+    for p in autocommit_parsers:
+        p.add_argument(
+            '-a', '--autocommit', dest='autocommit', action='store_true',
+            help='generate a commit for changes to subtree.conf')
+
+    for p in target_parsers:
+        p.add_argument(
+            '-t', '--target', dest='target', action='store',
+            default=os.getcwd(), help='path to combo repository, \
+            defaults to the current working directory')
+
+    for p in force_parsers:
+        p.add_argument(
+            '-f', '--force', dest='force', action='store_true',
+            help='skip dirty tree validation')
+
+    args = parser.parse_args()
+
+    if not hasattr(args, 'op'):
+        # work around broken required=True behavior (or my lack of
+        # understanding) of add_subparsers
+        parser.print_usage(file=sys.stderr)
+        sys.stderr.write('error: too few arguments\n')
+        sys.exit(1)
+
+    setattr(args, 'target', os.path.normpath(args.target))
+    setattr(args, 'git', sh.git.bake('--no-pager', _cwd=args.target))
+    read_config(args)
+
+    args.setup(args)
+    args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(0 if main() else 1)
