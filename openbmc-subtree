@@ -364,7 +364,6 @@ def get_commit_message_for_squashed_update(subtrees, args):
         commit_msg += '\n\nUpdate {} to {} HEAD.\n\n'.format(subtree, branch)
 
         if args.shortlog:
-            workdir = args.config[subtree]['local_repo_dir']
             commit_msg += decode(args.git('shortlog', revlist))
     else:
         commit_msg = 'subtree update\n\n'
