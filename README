@@ -5,7 +5,8 @@ Quickstart
 -------------------------------
 From whatever directory this repository was cloned to:
 git clone ssh://openbmc.gerrit/openbmc/openbmc
-./subtree update -c master.conf -t openbmc -sxa
+scp -p -P 29418 openbmc.gerrit:hooks/commit-msg openbmc/.git/hooks
+./openbmc-subtree update -c master.conf -t openbmc -sxa
 cd openbmc && git push origin HEAD:refs/for/master
 
 Description
