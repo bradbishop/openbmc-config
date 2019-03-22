@@ -152,14 +152,13 @@ def reset_one_subtree(args, subtree):
     with tempfile.TemporaryDirectory() as tmpdir:
         clone_args = ['--branch', branch, '--single-branch', uri, tmpdir]
         sh.git.clone(*clone_args)
-        new_subtree_head = decode(git('rev-parse', branch, _cwd=tmpdir))
-        rev_parse_args = ('--abbrev-ref', 'HEAD')
-        rsync(tmpdir + os.sep, target + os.sep)
+        new_subtree_head = decode(sh.git('rev-parse', branch, _cwd=tmpdir))
+        rsync(tmpdir + os.sep, os.path.join(args.target, target) + os.sep)
 
-    if decode(git.status('--porcelain', target)) == '':
+    if decode(args.git.status('--porcelain', target)) == '':
         return None
 
-    git.add(target)
+    args.git.add(target)
     return new_subtree_head
 
 
@@ -196,15 +195,15 @@ def get_commit_message_for_reset(args, reset_subtrees):
 def autocommit_reset(args, reset_info):
     """When doing a reset and subtree.conf is changed and exists in a git
     repository, generate a commit in that repository."""
-    workdir = os.path.dirname(args.configfile)
+    workdir = os.path.normpath(os.path.dirname(args.configfile))
     autocommit_message = 'subtree {}\n\n'.format(args.op)
 
     basename = os.path.basename(sys.argv[0])
     cmdline = [basename] + sys.argv[1:]
     autocommit_message += '\n{}'.format(' '.join(cmdline))
-    git.add(os.path.basename(args.configfile), _cwd=workdir)
+    sh.git.add(os.path.basename(args.configfile), _cwd=workdir)
     commit_args = ['-m', autocommit_message]
-    git.commit(*commit_args, _cwd=workdir)
+    sh.git.commit(*commit_args, _cwd=workdir)
 
 
 def do_reset(args):
@@ -225,7 +224,14 @@ def do_reset(args):
         commit_args = ['-e', '-m', commit_msg]
         if args.signoff:
             commit_args.insert(0, '-s')
-        git.commit(*commit_args, _fg=True)
+
+        # _cwd=args.target does not seem to work like I want with _fg=True
+        # (we don't wind up editing the commit message in args.target/.git)
+        cwd = os.getcwd()
+        os.chdir(args.target)
+        sh.git.commit(*commit_args, _fg=True)
+        os.chdir(cwd)
+
         with open(args.configfile, 'w') as fd:
             args.newconfig.write(fd)
 
