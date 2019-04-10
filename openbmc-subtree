@@ -88,6 +88,8 @@ def setup_and_validate_subtrees(args):
         display('Skipping invalid subtree(s): \'{}\''.format(
             ' '.join(invalid_subtrees)))
 
+    valid_subtrees = valid_subtrees.difference(args.exclude_subtrees)
+
     setattr(args, 'subtrees', valid_subtrees)
 
 
@@ -486,6 +488,7 @@ subtree.conf.'''
     verbose_parsers = [update_parser, reset_parser]
     config_parsers = [update_parser, reset_parser]
     subtree_parsers = [update_parser, reset_parser]
+    exclude_parsers = [update_parser, reset_parser]
     sign_off_parsers = [update_parser, reset_parser]
     autocommit_parsers = [update_parser, reset_parser]
     target_parsers = [update_parser, reset_parser]
@@ -506,6 +509,12 @@ subtree.conf.'''
         p.add_argument(
             '--subtree', dest='subtrees', action='append',
             help='subtree to update, can be specified multiple times',
+            default=[])
+
+    for p in exclude_parsers:
+        p.add_argument(
+            '--exclude-subtree', dest='exclude_subtrees', action='append',
+            help='subtree to exclude, can be specified multiple times',
             default=[])
 
     for p in sign_off_parsers:
