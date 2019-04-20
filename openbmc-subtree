@@ -377,34 +377,40 @@ def update_one_subtree(args, subtree):
     return results
 
 
-def get_commit_message_for_squashed_update(subtrees, args):
-    if len(subtrees) == 1:
-        subtree = subtrees[0]
+def indent_shortlog(shortlog, pad):
+    lines = [pad + l for l in shortlog.split('\n')]
+    return '\n'.join(lines)
 
-        branch = args.config[subtree]['branch']
-        original_rev = args.config[subtree]['last_revision'][:10]
-        new_rev = args.newconfig[subtree]['last_revision'][:10]
+
+def get_commit_message_for_squashed_update(subtrees, args):
+    commit_header_fmt = '{subtree}: {desc}{revlist}{sep}\n'
+    commit_header_args = {'desc': '', 'sep': ''}
+    commit_msg = ''
+
+    if len(subtrees) != 1:
+        commit_msg += 'subtree updates\n\n'
+        if args.shortlog:
+            commit_header_args['sep'] = ':'
+    else:
+        commit_header_args['desc'] = 'subtree update:'
+
+    for s in subtrees:
+        original_rev = args.config[s]['last_revision'][:10]
+        new_rev = args.newconfig[s]['last_revision'][:10]
         revlist = '{}..{}'.format(original_rev, new_rev)
 
-        commit_header_fmt = '{}: refresh {}: {}'
-        commit_header_args = (subtree, branch, revlist)
-        commit_msg = commit_header_fmt.format(*commit_header_args)
-        commit_msg += '\n\nUpdate {} to {} HEAD.\n\n'.format(subtree, branch)
+        commit_header_args['revlist'] = revlist
+        commit_header_args['subtree'] = s
+        commit_msg += commit_header_fmt.format(**commit_header_args)
 
         if args.shortlog:
-            commit_msg += decode(args.git('shortlog', revlist))
-    else:
-        commit_msg = 'subtree update\n\n'
-        for s in subtrees:
-            branch = args.config[s]['branch']
-            original_rev = args.config[s]['last_revision'][:10]
-            new_rev = args.newconfig[s]['last_revision'][:10]
-            revlist = '{}..{}'.format(original_rev, new_rev)
+            shortlog = decode(args.git('shortlog', revlist))
+            if len(subtrees) != 1:
+                commit_msg += indent_shortlog(shortlog, '  ')
+            else:
+                commit_msg += '\n{}'.format(shortlog)
 
-            commit_header_fmt = '{} - refresh {} {}\n'
-            commit_header_args = (s, branch, revlist)
-            commit_msg += commit_header_fmt.format(*commit_header_args)
-        commit_msg += '\n'
+            commit_msg += '\n\n'
 
     return commit_msg
 
