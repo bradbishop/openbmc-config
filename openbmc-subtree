@@ -18,6 +18,7 @@
 
 import argparse
 import configparser
+import functools
 import os
 import sh
 import sys
@@ -38,6 +39,22 @@ def log(msg, args):
 def decode(arg, desc='stdout'):
     obj = getattr(arg, desc)
     return obj.decode('utf-8').strip()
+
+
+def linesplit(words, sep, maxlen):
+    """Use sep='\n' and maxlen=72 to split a long string into something
+    suitable for a commit message."""
+    def reducer(first, second):
+        if (len(' '.join([*first[-1], second])) > maxlen):
+            first.insert(-1, [*first[-1]])
+            first[-1] = []
+        first[-1].append(second)
+        return first
+
+    lines = functools.reduce(reducer, words, [[]])
+    lines = [' '.join(line) for line in lines]
+    sep = ' {}'.format(sep)
+    return sep.join(lines)
 
 
 def read_config(args):
@@ -201,8 +218,8 @@ def autocommit_reset(args, reset_info):
     autocommit_message = 'subtree {}\n\n'.format(args.op)
 
     basename = os.path.basename(sys.argv[0])
-    cmdline = [basename] + sys.argv[1:]
-    autocommit_message += '\n{}'.format(' '.join(cmdline))
+    cmdline = linesplit([basename] + sys.argv[1:], '\\\n    ', 72)
+    autocommit_message += '\n{}'.format(cmdline)
     sh.git.add(os.path.basename(args.configfile), _cwd=workdir)
     commit_args = ['-m', autocommit_message]
     sh.git.commit(*commit_args, _cwd=workdir)
@@ -435,8 +452,8 @@ def autocommit_update(args, update_info):
             autocommit_message += '    {} {}\n'.format(r[1], r[2])
 
     basename = os.path.basename(sys.argv[0])
-    cmdline = [basename] + sys.argv[1:]
-    autocommit_message += '\n{}'.format(' '.join(cmdline))
+    cmdline = linesplit([basename] + sys.argv[1:], '\\\n    ', 72)
+    autocommit_message += '\n{}'.format(cmdline)
     sh.git.add(os.path.basename(args.configfile), _cwd=workdir)
     commit_args = ['-m', autocommit_message]
     sh.git.commit(*commit_args, _cwd=workdir)
