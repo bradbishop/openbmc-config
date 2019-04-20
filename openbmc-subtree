@@ -211,11 +211,12 @@ def get_commit_message_for_reset(args, reset_subtrees):
     return commit_msg
 
 
-def autocommit_reset(args, reset_info):
+def autocommit_reset(args, reset_info, original_head, new_head):
     """When doing a reset and subtree.conf is changed and exists in a git
     repository, generate a commit in that repository."""
     workdir = os.path.normpath(os.path.dirname(args.configfile))
-    autocommit_message = 'subtree {}\n\n'.format(args.op)
+    autocommit_message = 'subtree {}: {} -> {}\n\n'.format(
+        args.op, original_head[:10], new_head[:10])
 
     basename = os.path.basename(sys.argv[0])
     cmdline = linesplit([basename] + sys.argv[1:], '\\\n    ', 72)
@@ -228,6 +229,7 @@ def autocommit_reset(args, reset_info):
 def do_reset(args):
     """Reset subcommand callback"""
     reset_subtrees = []
+    original_head = decode(args.git('rev-list', 'HEAD'))
 
     for s in args.subtrees:
         new_subtree_head = reset_one_subtree(args, s)
@@ -255,7 +257,8 @@ def do_reset(args):
             args.newconfig.write(fd)
 
         if args.autocommit:
-            autocommit_reset(args, reset_subtrees)
+            new_head = decode(args.git('rev-list', 'HEAD'))
+            autocommit_reset(args, reset_subtrees, original_head, new_head)
 
 
 def setup_and_validate_update(args):
@@ -408,6 +411,7 @@ def get_commit_message_for_squashed_update(subtrees, args):
 
 def do_update(args):
     """Update subcommand callback"""
+    original_head = decode(args.git('rev-list', 'HEAD'))
     all_update_info = {}
 
     for s in args.subtrees:
@@ -436,14 +440,16 @@ def do_update(args):
         with open(args.configfile, 'w') as fd:
             args.newconfig.write(fd)
         if args.autocommit:
-            autocommit_update(args, all_update_info)
+            new_head = decode(args.git('rev-list', 'HEAD'))
+            autocommit_update(args, all_update_info, original_head, new_head)
 
 
-def autocommit_update(args, update_info):
+def autocommit_update(args, update_info, original_head, new_head):
     """When doing an update and subtree.conf is changed and exists in a git
     repository, generate a commit in that repository."""
     workdir = os.path.normpath(os.path.dirname(args.configfile))
-    autocommit_message = 'subtree {}\n\n'.format(args.op)
+    autocommit_message = 'subtree {}: {} -> {}\n\n'.format(
+        args.op, original_head[:10], new_head[:10])
     for s, revs in update_info.items():
         original_rev = args.config[s]['last_revision'][:10]
         new_rev = args.newconfig[s]['last_revision'][:10]
