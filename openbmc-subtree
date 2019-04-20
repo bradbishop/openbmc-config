@@ -423,7 +423,7 @@ def do_update(args):
 
 
 def autocommit_update(args, update_info):
-    """When doing a reset and subtree.conf is changed and exists in a git
+    """When doing an update and subtree.conf is changed and exists in a git
     repository, generate a commit in that repository."""
     workdir = os.path.normpath(os.path.dirname(args.configfile))
     autocommit_message = 'subtree {}\n\n'.format(args.op)
