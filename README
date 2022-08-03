@@ -27,3 +27,10 @@ Finally openbmc-subtree introduces support for a "reset" usage scenario where a
 subtree can be completely reset - OpenBMC uses this when switching from one
 upstream release branch to another.
 
+Adding new subtrees
+-------------------------------
+To add a new subtree, simply clone the subtree repository to the desired
+directory.  Optionally check out the desired subtree repository branch.  Make a
+note of the subtree working tree commit SHA, and then delete the subtree git
+repository: 'rm -r .git'.  Finally, add the new subtree metadata to the
+configuration file, with last_revision set to the commit SHA noted previously.
